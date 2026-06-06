@@ -2,7 +2,7 @@
 
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { vapi } from "@/lib/vapi";
+import { vapi, vapiWorkflowId } from "@/lib/vapi";
 import { useUser } from "@clerk/nextjs";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
@@ -13,6 +13,7 @@ const GenerateProgramPage = () => {
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [messages, setMessages] = useState<any[]>([]);
   const [callEnded, setCallEnded] = useState(false);
+  const [micError, setMicError] = useState<string | null>(null);
 
   const { user } = useUser();
   const router = useRouter();
@@ -25,9 +26,9 @@ const GenerateProgramPage = () => {
     // override console.error to ignore "Meeting has ended" errors
     console.error = function (msg, ...args) {
       if (
-        msg &&
-        (msg.includes("Meeting has ended") ||
-          (args[0] && args[0].toString().includes("Meeting has ended")))
+        (typeof msg === "string" && msg.includes("Meeting has ended")) ||
+        (typeof msg?.toString === "function" && msg.toString().includes("Meeting has ended")) ||
+        (args[0] && typeof args[0].toString === "function" && args[0].toString().includes("Meeting has ended"))
       ) {
         console.log("Ignoring known error: Meeting has ended");
         return; // don't pass to original handler
@@ -61,17 +62,17 @@ const GenerateProgramPage = () => {
     }
   }, [callEnded, router]);
 
-  // setup event listeners for vapi
+  // setup event listeners for vapi — verbose logging for debugging
   useEffect(() => {
     const handleCallStart = () => {
-      console.log("Call started");
+      console.log("[Vapi] ✅ call-start: Connection established successfully.");
       setConnecting(false);
       setCallActive(true);
       setCallEnded(false);
     };
 
     const handleCallEnd = () => {
-      console.log("Call ended");
+      console.log("[Vapi] 📞 call-end: The call has ended.");
       setCallActive(false);
       setConnecting(false);
       setIsSpeaking(false);
@@ -79,15 +80,17 @@ const GenerateProgramPage = () => {
     };
 
     const handleSpeechStart = () => {
-      console.log("AI started Speaking");
+      console.log("[Vapi] 🗣️ speech-start: AI assistant started speaking.");
       setIsSpeaking(true);
     };
 
     const handleSpeechEnd = () => {
-      console.log("AI stopped Speaking");
+      console.log("[Vapi] 🔇 speech-end: AI assistant stopped speaking.");
       setIsSpeaking(false);
     };
+
     const handleMessage = (message: any) => {
+      console.log("[Vapi] 💬 message:", message.type, message);
       if (message.type === "transcript" && message.transcriptType === "final") {
         const newMessage = { content: message.transcript, role: message.role };
         setMessages((prev) => [...prev, newMessage]);
@@ -95,7 +98,29 @@ const GenerateProgramPage = () => {
     };
 
     const handleError = (error: any) => {
-      console.log("Vapi Error", error);
+      console.error("[Vapi] ❌ error event:", error);
+
+      // Surface specific HTTP status codes
+      const statusCode = error?.statusCode ?? error?.status ?? error?.code;
+      const errorMsg =
+        error?.message ?? error?.msg ?? JSON.stringify(error);
+
+      if (statusCode === 401 || errorMsg?.includes("401") || errorMsg?.toLowerCase().includes("unauthorized")) {
+        console.error(
+          "[Vapi] 🔑 401 Unauthorized — Your NEXT_PUBLIC_VAPI_API_KEY is invalid or expired. " +
+            "Verify the key in your .env.local matches your Vapi dashboard."
+        );
+      } else if (statusCode === 404 || errorMsg?.includes("404") || errorMsg?.toLowerCase().includes("not found")) {
+        console.error(
+          "[Vapi] 🔍 404 Not Found — The assistant/workflow ID (NEXT_PUBLIC_VAPI_WORKFLOW_ID) was not found. " +
+            "Check that it exists in your Vapi dashboard and is correctly set in .env.local."
+        );
+      } else if (statusCode === 403 || errorMsg?.toLowerCase().includes("forbidden")) {
+        console.error(
+          "[Vapi] 🚫 403 Forbidden — Your API key does not have permission for this resource."
+        );
+      }
+
       setConnecting(false);
       setCallActive(false);
     };
@@ -121,27 +146,77 @@ const GenerateProgramPage = () => {
   }, []);
 
   const toggleCall = async () => {
-    if (callActive) vapi.stop();
-    else {
-      try {
-        setConnecting(true);
-        setMessages([]);
-        setCallEnded(false);
+    if (callActive) {
+      console.log("[Vapi] Stopping active call...");
+      vapi.stop();
+      return;
+    }
 
-        const fullName = user?.firstName
-          ? `${user.firstName} ${user.lastName || ""}`.trim()
-          : "There";
+    // Reset state
+    setConnecting(true);
+    setMessages([]);
+    setCallEnded(false);
+    setMicError(null);
 
-        await vapi.start(process.env.NEXT_PUBLIC_VAPI_WORKFLOW_ID!, {
-          variableValues: {
-            full_name: fullName,
-            user_id: user?.id,
-          },
-        });
-      } catch (error) {
-        console.log("Failed to start call", error);
-        setConnecting(false);
+    // --- Environment Validation (fail-fast) ---
+    if (!vapiWorkflowId) {
+      console.error(
+        "[Vapi] ❌ Cannot start call: NEXT_PUBLIC_VAPI_WORKFLOW_ID is not defined in .env.local"
+      );
+      setConnecting(false);
+      setMicError("Configuration error: Assistant ID is missing.");
+      return;
+    }
+
+    // --- Microphone Gatekeeper ---
+    try {
+      console.log("[Vapi] 🎤 Requesting microphone access...");
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      // Immediately release the mic — Vapi will acquire its own stream
+      stream.getTracks().forEach((track) => track.stop());
+      console.log("[Vapi] 🎤 Microphone access granted.");
+    } catch (micErr: any) {
+      console.error("[Vapi] 🎤 Microphone access denied or unavailable:", micErr);
+
+      let userMessage = "Microphone access denied.";
+      if (micErr.name === "NotFoundError" || micErr.name === "DevicesNotFoundError") {
+        userMessage = "No microphone found. Please connect a microphone and try again.";
+      } else if (micErr.name === "NotAllowedError" || micErr.name === "PermissionDeniedError") {
+        userMessage = "Microphone access denied. Please allow microphone access in your browser settings.";
+      } else if (micErr.name === "NotReadableError" || micErr.name === "TrackStartError") {
+        userMessage = "Microphone is in use by another application.";
       }
+
+      setMicError(userMessage);
+      setConnecting(false);
+      return;
+    }
+
+    // --- Start Vapi Call ---
+    try {
+      const fullName = user?.firstName
+        ? `${user.firstName} ${user.lastName || ""}`.trim()
+        : "There";
+
+      console.log(`[Vapi] 📞 Starting call with workflow ID: ${vapiWorkflowId}`);
+
+      await vapi.start(vapiWorkflowId, {
+        variableValues: {
+          full_name: fullName,
+          user_id: user?.id,
+        },
+      });
+
+      console.log("[Vapi] 📞 vapi.start() resolved — waiting for call-start event.");
+    } catch (error: any) {
+      console.error("[Vapi] ❌ Failed to start call:", error);
+      console.error("[Vapi] Error details:", {
+        message: error?.message,
+        statusCode: error?.statusCode ?? error?.status,
+        name: error?.name,
+        stack: error?.stack,
+      });
+      setConnecting(false);
     }
   };
 
@@ -166,18 +241,16 @@ const GenerateProgramPage = () => {
             <div className="aspect-video flex flex-col items-center justify-center p-6 relative">
               {/* AI VOICE ANIMATION */}
               <div
-                className={`absolute inset-0 ${
-                  isSpeaking ? "opacity-30" : "opacity-0"
-                } transition-opacity duration-300`}
+                className={`absolute inset-0 ${isSpeaking ? "opacity-30" : "opacity-0"
+                  } transition-opacity duration-300`}
               >
                 {/* Voice wave animation when speaking */}
                 <div className="absolute left-0 right-0 top-1/2 -translate-y-1/2 flex justify-center items-center h-20">
                   {[...Array(5)].map((_, i) => (
                     <div
                       key={i}
-                      className={`mx-1 h-16 w-1 bg-primary rounded-full ${
-                        isSpeaking ? "animate-sound-wave" : ""
-                      }`}
+                      className={`mx-1 h-16 w-1 bg-primary rounded-full ${isSpeaking ? "animate-sound-wave" : ""
+                        }`}
                       style={{
                         animationDelay: `${i * 0.1}s`,
                         height: isSpeaking ? `${Math.random() * 50 + 20}%` : "5%",
@@ -190,9 +263,8 @@ const GenerateProgramPage = () => {
               {/* AI IMAGE */}
               <div className="relative size-32 mb-4">
                 <div
-                  className={`absolute inset-0 bg-primary opacity-10 rounded-full blur-lg ${
-                    isSpeaking ? "animate-pulse" : ""
-                  }`}
+                  className={`absolute inset-0 bg-primary opacity-10 rounded-full blur-lg ${isSpeaking ? "animate-pulse" : ""
+                    }`}
                 />
 
                 <div className="relative w-full h-full rounded-full bg-card flex items-center justify-center border border-border overflow-hidden">
@@ -205,30 +277,32 @@ const GenerateProgramPage = () => {
                 </div>
               </div>
 
-              <h2 className="text-xl font-bold text-foreground">CodeFlex AI</h2>
+              <h2 className="text-xl font-bold text-foreground">AI Personal Fitness Trainer</h2>
               <p className="text-sm text-muted-foreground mt-1">Fitness & Diet Coach</p>
 
               {/* SPEAKING INDICATOR */}
 
               <div
-                className={`mt-4 flex items-center gap-2 px-3 py-1 rounded-full bg-card border border-border ${
-                  isSpeaking ? "border-primary" : ""
-                }`}
+                className={`mt-4 flex items-center gap-2 px-3 py-1 rounded-full bg-card border border-border ${isSpeaking ? "border-primary" : ""
+                  }`}
               >
                 <div
-                  className={`w-2 h-2 rounded-full ${
-                    isSpeaking ? "bg-primary animate-pulse" : "bg-muted"
-                  }`}
+                  className={`w-2 h-2 rounded-full ${isSpeaking ? "bg-primary animate-pulse" : "bg-muted"
+                    }`}
                 />
 
                 <span className="text-xs text-muted-foreground">
-                  {isSpeaking
-                    ? "Speaking..."
-                    : callActive
-                      ? "Listening..."
-                      : callEnded
-                        ? "Redirecting to profile..."
-                        : "Waiting..."}
+                  {micError
+                    ? micError
+                    : isSpeaking
+                      ? "Speaking..."
+                      : callActive
+                        ? "Listening..."
+                        : connecting
+                          ? "Connecting..."
+                          : callEnded
+                            ? "Redirecting to profile..."
+                            : "Waiting..."}
                 </span>
               </div>
             </div>
@@ -271,7 +345,7 @@ const GenerateProgramPage = () => {
               {messages.map((msg, index) => (
                 <div key={index} className="message-item animate-fadeIn">
                   <div className="font-semibold text-xs text-muted-foreground mb-1">
-                    {msg.role === "assistant" ? "CodeFlex AI" : "You"}:
+                    {msg.role === "assistant" ? "Personal Fitness Trainer AI" : "You"}:
                   </div>
                   <p className="text-foreground">{msg.content}</p>
                 </div>
@@ -292,13 +366,12 @@ const GenerateProgramPage = () => {
         {/* CALL CONTROLS */}
         <div className="w-full flex justify-center gap-4">
           <Button
-            className={`w-40 text-xl rounded-3xl ${
-              callActive
+            className={`w-40 text-xl rounded-3xl ${callActive
                 ? "bg-destructive hover:bg-destructive/90"
                 : callEnded
                   ? "bg-green-600 hover:bg-green-700"
                   : "bg-primary hover:bg-primary/90"
-            } text-white relative`}
+              } text-white relative`}
             onClick={toggleCall}
             disabled={connecting || callEnded}
           >

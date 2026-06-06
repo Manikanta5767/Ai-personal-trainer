@@ -10,7 +10,7 @@ const http = httpRouter();
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
 
 http.route({
-  path: "/clerk-webhook",
+  path: "/clerk",
   method: "POST",
   handler: httpAction(async (ctx, request) => {
     const webhookSecret = process.env.CLERK_WEBHOOK_SECRET;
