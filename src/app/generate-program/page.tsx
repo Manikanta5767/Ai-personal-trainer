@@ -2,6 +2,7 @@
 
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import LiveFormCheck from "@/components/LiveFormCheck";
 import { vapi, vapiWorkflowId } from "@/lib/vapi";
 import { useUser } from "@clerk/nextjs";
 import { useRouter } from "next/navigation";
@@ -389,6 +390,20 @@ const GenerateProgramPage = () => {
                     : "Start Call"}
             </span>
           </Button>
+        </div>
+
+        {/* LIVE FORM CHECK */}
+        <div className="mt-10">
+          <div className="text-center mb-6">
+            <h2 className="text-2xl font-bold font-mono">
+              <span>Live </span>
+              <span className="text-primary uppercase">Form Check</span>
+            </h2>
+            <p className="text-muted-foreground mt-2 text-sm">
+              Real-time posture analysis powered by MediaPipe — your skeleton overlay appears automatically
+            </p>
+          </div>
+          <LiveFormCheck />
         </div>
       </div>
     </div>
